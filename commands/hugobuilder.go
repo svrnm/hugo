@@ -45,6 +45,7 @@ import (
 	"github.com/gohugoio/hugo/hugolib"
 	"github.com/gohugoio/hugo/hugolib/filesystems"
 	"github.com/gohugoio/hugo/identity"
+	"github.com/gohugoio/hugo/internal/telemetry"
 	"github.com/gohugoio/hugo/internal/warpc"
 	"github.com/gohugoio/hugo/livereload"
 	"github.com/gohugoio/hugo/resources/page"
@@ -468,11 +469,13 @@ func (c *hugoBuilder) buildSites(noBuildLock bool) (err error) {
 	if err != nil {
 		return
 	}
-	err = h.Build(hugolib.BuildCfg{NoBuildLock: noBuildLock})
+	err = h.Build(hugolib.BuildCfg{Context: c.r.ctx, NoBuildLock: noBuildLock})
 	return
 }
 
-func (c *hugoBuilder) copyStatic() (map[string]uint64, error) {
+func (c *hugoBuilder) copyStatic() (counts map[string]uint64, err error) {
+	_, span := telemetry.Start(c.r.ctx, "hugo.build.copy_static")
+	defer func() { telemetry.End(span, err) }()
 	return c.doWithPublishDirs(c.copyStaticTo)
 }
 
@@ -1230,7 +1233,7 @@ func (c *hugoBuilder) rebuildSites(events []fsnotify.Event) (err error) {
 	if err != nil {
 		return
 	}
-	err = h.Build(hugolib.BuildCfg{NoBuildLock: true, RecentlyTouched: c.visitedURLs, ErrRecovery: c.errState.wasErr()}, events...)
+	err = h.Build(hugolib.BuildCfg{Context: c.r.ctx, NoBuildLock: true, RecentlyTouched: c.visitedURLs, ErrRecovery: c.errState.wasErr()}, events...)
 	return
 }
 
@@ -1247,7 +1250,7 @@ func (c *hugoBuilder) rebuildSitesForChanges(ids []identity.Identity) (err error
 	}
 	whatChanged := &hugolib.WhatChanged{}
 	whatChanged.Add(ids...)
-	err = h.Build(hugolib.BuildCfg{NoBuildLock: true, WhatChanged: whatChanged, RecentlyTouched: c.visitedURLs, ErrRecovery: c.errState.wasErr()})
+	err = h.Build(hugolib.BuildCfg{Context: c.r.ctx, NoBuildLock: true, WhatChanged: whatChanged, RecentlyTouched: c.visitedURLs, ErrRecovery: c.errState.wasErr()})
 
 	return
 }

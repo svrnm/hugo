@@ -408,6 +408,9 @@ type DepsCfg struct {
 	// The logging level to use.
 	LogLevel logg.Level
 
+	// LogHook receives entries after console logging.
+	LogHook func(*logg.Entry) error
+
 	// Logging output.
 	StdErr io.Writer
 

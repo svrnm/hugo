@@ -130,7 +130,7 @@ func (ns *Namespace) TailwindCSS(args ...any) (resource.Resource, error) {
 }
 
 // Sass processes the given Resource with SASS.
-func (ns *Namespace) Sass(args ...any) (resource.Resource, error) {
+func (ns *Namespace) Sass(ctx context.Context, args ...any) (resource.Resource, error) {
 	if len(args) > 2 {
 		return nil, errors.New("must not provide more arguments than resource object and options")
 	}
@@ -176,7 +176,7 @@ func (ns *Namespace) Sass(args ...any) (resource.Resource, error) {
 		return nil, err
 	}
 
-	return client.ToCSS(r, m)
+	return client.ToCSS(ctx, r, m)
 }
 
 // Build processes the given CSS Resource with ESBuild.

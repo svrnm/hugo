@@ -20,8 +20,9 @@ import (
 )
 
 // newExec wires up all of Hugo's CLI.
-func newExec() (*simplecobra.Exec, error) {
+func newExec(ctx context.Context) (*simplecobra.Exec, error) {
 	rootCmd := &rootCommand{
+		ctx: ctx,
 		commands: []simplecobra.Commander{
 			newHugoBuildCmd(),
 			newVersionCmd(),

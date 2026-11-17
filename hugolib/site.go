@@ -66,6 +66,8 @@ import (
 	"github.com/gohugoio/hugo/common/paths"
 
 	"github.com/gohugoio/hugo/identity"
+	"github.com/gohugoio/hugo/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/gohugoio/hugo/markup/converter/hooks"
 
@@ -239,9 +241,19 @@ func NewHugoSites(cfg deps.DepsCfg) (*HugoSites, error) {
 		}
 
 		logOpts := loggers.Options{
-			Level:              cfg.LogLevel,
-			DistinctLevel:      logg.LevelWarn, // This will drop duplicate log warning and errors.
-			HandlerPost:        logHookLast,
+			Level:         cfg.LogLevel,
+			DistinctLevel: logg.LevelWarn, // This will drop duplicate log warning and errors.
+			HandlerPost: func(e *logg.Entry) error {
+				if cfg.LogHook != nil {
+					if err := cfg.LogHook(e); err != nil {
+						return err
+					}
+				}
+				if logHookLast != nil {
+					return logHookLast(e)
+				}
+				return nil
+			},
 			StdOut:             cfg.StdOut,
 			StdErr:             cfg.StdErr,
 			StoreErrors:        conf.Watching(),
@@ -1636,7 +1648,21 @@ const (
 	pageDependencyScopeGlobal
 )
 
-func (s *Site) renderAndWritePage(statCounter *uint64, targetPath string, p *pageState, d any, templ *tplimpl.TemplInfo) error {
+func (s *Site) renderAndWritePage(ctx context.Context, statCounter *uint64, targetPath string, p *pageState, d any, templ *tplimpl.TemplInfo) (err error) {
+	if telemetry.Enabled(ctx) {
+		attrs := []attribute.KeyValue{
+			attribute.String("hugo.site.language", s.language.Lang),
+			attribute.String("hugo.page.kind", p.Kind()),
+			attribute.String("hugo.output.format", p.outputFormat().Name),
+		}
+		pageCtx, span := telemetry.Start(ctx, "hugo.page.render", attrs...)
+		ctx = pageCtx
+		defer func() { telemetry.End(span, err) }()
+		span.SetAttributes(attribute.String("hugo.page.path", p.Path()), attribute.String("hugo.template.name", templ.Name()))
+		start := time.Now()
+		defer func() { telemetry.PageFinished(ctx, start, err, attrs...) }()
+	}
+
 	s.h.onPageRender()
 	renderBuffer := bp.GetBuffer()
 	defer bp.PutBuffer(renderBuffer)
@@ -1644,7 +1670,7 @@ func (s *Site) renderAndWritePage(statCounter *uint64, targetPath string, p *pag
 	of := p.outputFormat()
 	p.incrRenderState()
 
-	ctx := s.TemplateStore.PrepareTopLevelRenderCtx(context.Background(), p)
+	ctx = s.TemplateStore.PrepareTopLevelRenderCtx(ctx, p)
 	ctx = tpl.Context.DependencyManagerScopedProvider.Set(ctx, p)
 
 	if err := s.renderForTemplate(ctx, p.Kind(), of.Name, d, renderBuffer, templ); err != nil {

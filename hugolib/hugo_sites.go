@@ -636,6 +636,9 @@ func (h *HugoSites) withPage(fn func(s string, p *pageState) bool) {
 
 // BuildCfg holds build options used to, as an example, skip the render step.
 type BuildCfg struct {
+	// Context carries cancellation and telemetry. A nil value uses context.Background().
+	Context context.Context
+
 	// Skip rendering. Useful for testing.
 	SkipRender bool
 

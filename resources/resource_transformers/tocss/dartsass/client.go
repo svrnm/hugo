@@ -16,6 +16,7 @@
 package dartsass
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -98,11 +99,11 @@ type Client struct {
 	transpiler *godartsass.Transpiler
 }
 
-func (c *Client) ToCSS(res resources.ResourceTransformer, args map[string]any) (resource.Resource, error) {
+func (c *Client) ToCSS(ctx context.Context, res resources.ResourceTransformer, args map[string]any) (resource.Resource, error) {
 	if c.transpiler == nil {
-		return res.Transform(resources.NewExecNotFoundTransformer(transformationName, args))
+		return res.TransformWithContext(ctx, resources.NewExecNotFoundTransformer(transformationName, args))
 	}
-	return res.Transform(&transform{c: c, optsm: args})
+	return res.TransformWithContext(ctx, &transform{c: c, optsm: args})
 }
 
 func (c *Client) Close() error {

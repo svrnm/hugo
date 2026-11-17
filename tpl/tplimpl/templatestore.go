@@ -48,6 +48,7 @@ import (
 	"github.com/gohugoio/hugo/hugolib/doctree"
 	"github.com/gohugoio/hugo/hugolib/sitesmatrix"
 	"github.com/gohugoio/hugo/identity"
+	"github.com/gohugoio/hugo/internal/telemetry"
 	gc "github.com/gohugoio/hugo/markup/goldmark/goldmark_config"
 	"github.com/gohugoio/hugo/media"
 	"github.com/gohugoio/hugo/metrics"
@@ -550,8 +551,14 @@ func (t *TemplateStore) ExecuteWithContextAndKey(ctx context.Context, key string
 		return fmt.Errorf("maximum template call stack size exceeded in %q", ti.Filename())
 	}
 
-	if t.opts.Metrics != nil {
-		defer t.opts.Metrics.MeasureSince(templ.Name(), time.Now())
+	if t.opts.Metrics != nil || telemetry.TemplateMetricsEnabled(ctx) {
+		start := time.Now()
+		defer func() {
+			telemetry.TemplateFinished(ctx, templ.Name(), start)
+			if t.opts.Metrics != nil {
+				t.opts.Metrics.MeasureSince(templ.Name(), start)
+			}
+		}()
 	}
 
 	execErr := t.storeSite.executer.ExecuteWithContext(ctx, ti, wr, data)

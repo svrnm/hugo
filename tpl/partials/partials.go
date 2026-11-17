@@ -27,7 +27,10 @@ import (
 	"github.com/gohugoio/hugo/common/constants"
 	"github.com/gohugoio/hugo/common/hashing"
 	"github.com/gohugoio/hugo/identity"
+	"github.com/gohugoio/hugo/internal/telemetry"
 	texttemplate "github.com/gohugoio/hugo/tpl/internal/go_templates/texttemplate"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/gohugoio/hugo/tpl"
 	"github.com/gohugoio/hugo/tpl/tplimpl"
@@ -41,10 +44,12 @@ type partialCacheKey struct {
 	Variants []any
 }
 type includeResult struct {
-	name     string
-	result   any
-	mangager identity.Manager
-	err      error
+	name          string
+	result        any
+	mangager      identity.Manager
+	err           error
+	readyAt       time.Time
+	executionSpan trace.SpanContext
 }
 
 func (k partialCacheKey) Key() string {
@@ -214,22 +219,53 @@ func (ns *Namespace) IncludeCached(ctx context.Context, name string, context any
 		}
 	}
 
+	tracing := telemetry.Enabled(ctx)
+	cacheMetrics := telemetry.PartialCacheMetricsEnabled(ctx)
+	var cacheStart time.Time
+	if tracing || cacheMetrics {
+		cacheStart = time.Now()
+	}
 	r, found, err := ns.cachedPartials.cache.GetOrCreate(keyString, func(string) (includeResult, error) {
+		includeCtx := ctx
+		var span trace.Span
+		if tracing {
+			includeCtx, span = telemetry.Start(ctx, "hugo.partial.execute", attribute.String("hugo.partial.name", ti.Name()))
+		}
 		var depsManagerShared identity.Manager
 		if ns.deps.Conf.Watching() {
 			// We need to create a shared dependency manager to pass downwards
 			// and add those same dependencies to any cached invocation of this partial.
 			depsManagerShared = identity.NewManager()
-			ctx = tpl.Context.DependencyManagerScopedProvider.Set(ctx, depsManagerShared.(identity.DependencyManagerScopedProvider))
+			includeCtx = tpl.Context.DependencyManagerScopedProvider.Set(includeCtx, depsManagerShared.(identity.DependencyManagerScopedProvider))
 		}
 		// Mark the ctx so templates.Defer can reject being called from a cached body.
-		ctx = tpl.Context.IsInPartialCached.Set(ctx, true)
-		r := ns.doInclude(ctx, keyString, ti, context)
+		includeCtx = tpl.Context.IsInPartialCached.Set(includeCtx, true)
+		r := ns.doInclude(includeCtx, keyString, ti, context)
+		if span != nil {
+			r.executionSpan = span.SpanContext()
+			telemetry.End(span, r.err)
+			r.readyAt = time.Now()
+		}
 		if ns.deps.Conf.Watching() {
 			r.mangager = depsManagerShared
 		}
 		return r, r.err
 	})
+	cacheEnd := time.Time{}
+	if cacheMetrics || (tracing && found && r.readyAt.After(cacheStart)) {
+		cacheEnd = time.Now()
+	}
+	if cacheMetrics {
+		telemetry.PartialCacheFinished(ctx, ti.Name(), cacheEnd.Sub(cacheStart), found)
+	}
+	if tracing && found && r.readyAt.After(cacheStart) && r.executionSpan.IsValid() {
+		_, span := telemetry.StartWithOptions(ctx, "hugo.partial.cache_wait",
+			trace.WithTimestamp(cacheStart),
+			trace.WithAttributes(attribute.String("hugo.partial.name", ti.Name())),
+			trace.WithLinks(trace.Link{SpanContext: r.executionSpan}),
+		)
+		telemetry.End(span, err, trace.WithTimestamp(cacheEnd))
+	}
 	if err != nil {
 		return nil, err
 	}

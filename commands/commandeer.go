@@ -50,9 +50,11 @@ import (
 	"github.com/gohugoio/hugo/hugofs"
 	"github.com/gohugoio/hugo/hugolib"
 	"github.com/gohugoio/hugo/identity"
+	"github.com/gohugoio/hugo/internal/telemetry"
 	"github.com/gohugoio/hugo/resources/kinds"
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var errHelp = errors.New("help requested")
@@ -61,12 +63,22 @@ var errHelp = errors.New("help requested")
 func Execute(args []string) error {
 	// Default GOMAXPROCS to be CPU limit aware, still respecting GOMAXPROCS env.
 	maxprocs.Set()
-	x, err := newExec()
+	ctx, shutdown, err := telemetry.FromEnv(context.Background(), hugo.CurrentVersion.String())
+	defer func() {
+		if err := shutdown(); err != nil {
+			fmt.Fprintf(os.Stderr, "WARN OpenTelemetry shutdown: %s\n", err)
+		}
+	}()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "WARN OpenTelemetry setup: %s\n", err)
+		ctx = context.Background()
+	}
+	x, err := newExec(ctx)
 	if err != nil {
 		return err
 	}
 	args = mapLegacyArgs(args)
-	cd, err := x.Execute(context.Background(), args)
+	cd, err := x.Execute(ctx, args)
 	if cd != nil {
 		if closer, ok := cd.Root.Command.(types.Closer); ok {
 			closer.Close()
@@ -103,6 +115,8 @@ type configKey struct {
 
 // This is the root command.
 type rootCommand struct {
+	ctx context.Context
+
 	Printf  func(format string, v ...any)
 	Println func(a ...any)
 	StdOut  io.Writer
@@ -191,6 +205,7 @@ func (r *rootCommand) Build(cd *simplecobra.Commandeer, bcfg hugolib.BuildCfg, c
 	if err != nil {
 		return nil, err
 	}
+	bcfg.Context = r.ctx
 	if err := h.Build(bcfg); err != nil {
 		return nil, err
 	}
@@ -383,14 +398,30 @@ func (r *rootCommand) getOrCreateHugo(cfg config.Provider, ignoreModuleDoesNotEx
 }
 
 func (r *rootCommand) newDepsConfig(conf *commonConfig) deps.DepsCfg {
-	return deps.DepsCfg{Configs: conf.configs, Fs: conf.fs, StdOut: r.logger.StdOut(), StdErr: r.logger.StdErr(), LogLevel: r.logger.Level(), ChangesFromBuild: r.changesFromBuild}
+	return deps.DepsCfg{
+		Configs:  conf.configs,
+		Fs:       conf.fs,
+		StdOut:   r.logger.StdOut(),
+		StdErr:   r.logger.StdErr(),
+		LogLevel: r.logger.Level(),
+		LogHook: func(e *logg.Entry) error {
+			telemetry.ForwardLog(r.ctx, e)
+			return nil
+		},
+		ChangesFromBuild: r.changesFromBuild,
+	}
 }
 
 func (r *rootCommand) Name() string {
 	return "hugo"
 }
 
-func (r *rootCommand) Run(ctx context.Context, cd *simplecobra.Commandeer, args []string) error {
+func (r *rootCommand) Run(ctx context.Context, cd *simplecobra.Commandeer, args []string) (err error) {
+	if !r.buildWatch {
+		var span trace.Span
+		r.ctx, span = telemetry.StartCommand(ctx, "hugo.command.build")
+		defer func() { telemetry.EndCommand(span, err) }()
+	}
 	b := newHugoBuilder(r, nil)
 
 	if !r.buildWatch {
@@ -401,7 +432,7 @@ func (r *rootCommand) Run(ctx context.Context, cd *simplecobra.Commandeer, args 
 		return err
 	}
 
-	err := func() error {
+	err = func() error {
 		if r.buildWatch {
 			defer r.timeTrack(time.Now(), "Built")
 		}
@@ -523,7 +554,13 @@ func (r *rootCommand) createLogger(running bool) (loggers.Logger, error) {
 		StdOut:        r.StdOut,
 		StdErr:        r.StdErr,
 		StoreErrors:   running,
-		HandlerPost:   logHookLast,
+		HandlerPost: func(e *logg.Entry) error {
+			telemetry.ForwardLog(r.ctx, e)
+			if logHookLast != nil {
+				return logHookLast(e)
+			}
+			return nil
+		},
 	}
 
 	return loggers.New(optsLogger), nil

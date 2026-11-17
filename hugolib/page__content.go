@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	maps0 "maps"
@@ -35,6 +36,7 @@ import (
 	"github.com/gohugoio/hugo/common/predicate"
 	"github.com/gohugoio/hugo/common/types/hstring"
 	"github.com/gohugoio/hugo/helpers"
+	"github.com/gohugoio/hugo/internal/telemetry"
 	"github.com/gohugoio/hugo/markup"
 	"github.com/gohugoio/hugo/markup/converter"
 	"github.com/gohugoio/hugo/markup/goldmark/hugocontext"
@@ -47,6 +49,7 @@ import (
 	"github.com/gohugoio/hugo/tpl"
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/cast"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -501,6 +504,12 @@ func (c *cachedContentScope) contentRendered(ctx context.Context) (contentSummar
 		}))
 
 		cp.po.p.s.h.contentRenderCounter.Add(1)
+		if telemetry.Enabled(ctx) {
+			defer telemetry.ContentRendered(ctx, time.Now(),
+				attribute.String("hugo.site.language", cp.po.p.s.language.Lang),
+				attribute.String("hugo.output.format", cp.po.f.Name),
+			)
+		}
 		cp.contentRendered.Store(true)
 		po := cp.po
 

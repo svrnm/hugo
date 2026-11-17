@@ -25,7 +25,9 @@ import (
 	"github.com/gohugoio/hugo/common/paths"
 	"github.com/gohugoio/hugo/htesting"
 	"github.com/gohugoio/hugo/identity"
+	"github.com/gohugoio/hugo/internal/telemetry"
 	"github.com/gohugoio/hugo/media"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/gohugoio/hugo/resources"
 	"github.com/gohugoio/hugo/resources/resource"
@@ -61,7 +63,9 @@ func (t *transform) Key() internal.ResourceTransformationKey {
 	return internal.NewResourceTransformationKey(transformationName, t.optsm)
 }
 
-func (t *transform) Transform(ctx *resources.ResourceTransformationCtx) error {
+func (t *transform) Transform(ctx *resources.ResourceTransformationCtx) (err error) {
+	cctx, span := telemetry.Start(ctx.Ctx, "hugo.sass.transform", attribute.String("hugo.resource.path", ctx.SourcePath))
+	defer func() { telemetry.End(span, err) }()
 	ctx.OutMediaType = media.Builtin.CSSType
 
 	opts, err := decodeOptions(t.optsm)
@@ -105,7 +109,7 @@ func (t *transform) Transform(ctx *resources.ResourceTransformationCtx) error {
 			c:                 t.c,
 			dependencyManager: ctx.DependencyManager,
 			importContext:     ic,
-			ctx:               ctx.Ctx,
+			ctx:               cctx,
 
 			vars: opts.Vars,
 		},

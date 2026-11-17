@@ -33,6 +33,8 @@ import (
 )
 
 type siteRenderContext struct {
+	ctx context.Context
+
 	cfg *BuildCfg
 
 	infol logg.LevelLogger
@@ -102,7 +104,7 @@ func (s *Site) renderPages(ctx *siteRenderContext) error {
 		},
 	}
 
-	if err := w.Walk(context.Background()); err != nil {
+	if err := w.Walk(ctx.ctx); err != nil {
 		return err
 	}
 
@@ -208,7 +210,7 @@ func pageRenderer(
 			d = s.h.Sites
 		}
 
-		if err := s.renderAndWritePage(&s.PathSpec.ProcessingStats.Pages, targetPath, p, d, templ); err != nil {
+		if err := s.renderAndWritePage(ctx.ctx, &s.PathSpec.ProcessingStats.Pages, targetPath, p, d, templ); err != nil {
 			if sendErr(err) {
 				continue
 			} else {
@@ -227,7 +229,7 @@ func pageRenderer(
 		}
 
 		if p.paginator != nil && p.paginator.current != nil {
-			if err := s.renderPaginator(p, templ); err != nil {
+			if err := s.renderPaginator(ctx.ctx, p, templ); err != nil {
 				if sendErr(err) {
 					continue
 				} else {
@@ -273,7 +275,7 @@ func (s *Site) logMissingLayout(name, layout, kind, outputFormat string) {
 }
 
 // renderPaginator must be run after the owning Page has been rendered.
-func (s *Site) renderPaginator(p *pageState, templ *tplimpl.TemplInfo) error {
+func (s *Site) renderPaginator(ctx context.Context, p *pageState, templ *tplimpl.TemplInfo) error {
 	paginatePath := s.Conf.Pagination().Path
 
 	d := p.targetPathDescriptor
@@ -303,7 +305,7 @@ func (s *Site) renderPaginator(p *pageState, templ *tplimpl.TemplInfo) error {
 		targetPaths := page.CreateTargetPaths(d)
 
 		if err := s.renderAndWritePage(
-			&s.PathSpec.ProcessingStats.PaginatorPages,
+			ctx, &s.PathSpec.ProcessingStats.PaginatorPages,
 			targetPaths.TargetFilename, p, p, templ); err != nil {
 			return err
 		}

@@ -42,6 +42,8 @@ type Provider interface {
 	// TrackValue tracks the value for diff calculations etc.
 	TrackValue(key string, value any, cached bool)
 
+	CachePotential() map[string]int
+
 	// Reset clears the metric store.
 	Reset()
 }
@@ -131,6 +133,17 @@ func (s *Store) MeasureSince(key string, start time.Time) {
 	s.mu.Lock()
 	s.metrics[key] = append(s.metrics[key], time.Since(start))
 	s.mu.Unlock()
+}
+
+// CachePotential returns the computed similarity hints, empty when hints are disabled.
+func (s *Store) CachePotential() map[string]int {
+	s.diffmu.Lock()
+	defer s.diffmu.Unlock()
+	scores := make(map[string]int, len(s.diffs))
+	for name, d := range s.diffs {
+		scores[name] = int(math.Floor(float64(d.simSum) / float64(d.count)))
+	}
+	return scores
 }
 
 // WriteMetrics writes a summary of the metrics to w.

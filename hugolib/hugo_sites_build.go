@@ -38,10 +38,12 @@ import (
 	"github.com/gohugoio/hugo/hugolib/pagesfromdata"
 	"github.com/gohugoio/hugo/hugolib/segments"
 	"github.com/gohugoio/hugo/identity"
+	"github.com/gohugoio/hugo/internal/telemetry"
 	"github.com/gohugoio/hugo/output"
 	"github.com/gohugoio/hugo/publisher"
 	"github.com/gohugoio/hugo/source"
 	"github.com/gohugoio/hugo/tpl"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/gohugoio/hugo/common/herrors"
 	"github.com/gohugoio/hugo/common/loggers"
@@ -62,6 +64,12 @@ import (
 // Build builds all sites. If filesystem events are provided,
 // this is considered to be a potential partial rebuild.
 func (h *HugoSites) Build(config BuildCfg, events ...fsnotify.Event) (err error) {
+	ctx, span := telemetry.Start(config.Context, "hugo.build", attribute.Bool("hugo.build.rebuild", h.isRebuild()))
+	defer func() { telemetry.End(span, err) }()
+	start := time.Now()
+	rebuild := h.isRebuild()
+	defer func() { telemetry.BuildFinished(ctx, start, rebuild, err) }()
+	config.Context = ctx
 	if h.isRebuild() && !h.Conf.Watching() && !h.Conf.Running() {
 		return errors.New("Build called multiple times when not in watch or server mode (typically with hugolib.Test(t, files).Build(); Build() is already called once by Test)")
 	}
@@ -164,8 +172,6 @@ func (h *HugoSites) Build(config BuildCfg, events ...fsnotify.Event) (err error)
 				return nil
 			}
 
-			ctx := context.Background()
-
 			if err := h.process(ctx, infol, conf, init, events...); err != nil {
 				return fmt.Errorf("process: %w", err)
 			}
@@ -192,7 +198,7 @@ func (h *HugoSites) Build(config BuildCfg, events ...fsnotify.Event) (err error)
 	}
 
 	if prepareErr == nil {
-		if err := h.render(infol, conf); err != nil {
+		if err := h.render(ctx, infol, conf); err != nil {
 			h.SendError(fmt.Errorf("render: %w", err))
 		}
 
@@ -207,7 +213,7 @@ func (h *HugoSites) Build(config BuildCfg, events ...fsnotify.Event) (err error)
 			h.SendError(fmt.Errorf("printPathWarnings: %w", err))
 		}
 
-		if err := h.renderDeferred(infol); err != nil {
+		if err := h.renderDeferred(ctx, infol); err != nil {
 			h.SendError(fmt.Errorf("renderDeferred: %w", err))
 		}
 
@@ -216,12 +222,15 @@ func (h *HugoSites) Build(config BuildCfg, events ...fsnotify.Event) (err error)
 			h.SendError(fmt.Errorf("printPathWarnings: %w", err))
 		}
 
-		if err := h.postProcess(infol); err != nil {
+		if err := h.postProcess(ctx, infol); err != nil {
 			h.SendError(fmt.Errorf("postProcess: %w", err))
 		}
 	}
 
 	if h.Metrics != nil {
+		if h.Conf.TemplateMetricsHints() {
+			telemetry.CachePotential(ctx, h.Metrics.CachePotential())
+		}
 		var b bytes.Buffer
 		h.Metrics.WriteMetrics(&b)
 
@@ -278,7 +287,9 @@ func (h *HugoSites) initRebuild(config *BuildCfg) error {
 
 // process prepares the Sites' sources for a full or partial rebuild.
 // This will also parse the source and create all the Page objects.
-func (h *HugoSites) process(ctx context.Context, l logg.LevelLogger, config *BuildCfg, init func(config *BuildCfg) error, events ...fsnotify.Event) error {
+func (h *HugoSites) process(ctx context.Context, l logg.LevelLogger, config *BuildCfg, init func(config *BuildCfg) error, events ...fsnotify.Event) (err error) {
+	ctx, span := telemetry.Start(ctx, "hugo.build.process")
+	defer func() { telemetry.End(span, err) }()
 	l = l.WithField("step", "process")
 	defer loggers.TimeTrackf(l, time.Now(), nil, "")
 
@@ -297,7 +308,9 @@ func (h *HugoSites) process(ctx context.Context, l logg.LevelLogger, config *Bui
 
 // assemble creates missing sections, applies aggregate values (e.g. dates, cascading params),
 // removes disabled pages etc.
-func (h *HugoSites) assemble(ctx context.Context, l logg.LevelLogger, bcfg *BuildCfg) error {
+func (h *HugoSites) assemble(ctx context.Context, l logg.LevelLogger, bcfg *BuildCfg) (err error) {
+	ctx, span := telemetry.Start(ctx, "hugo.build.assemble")
+	defer func() { telemetry.End(span, err) }()
 	l = l.WithField("step", "assemble")
 	defer loggers.TimeTrackf(l, time.Now(), nil, "")
 
@@ -394,14 +407,16 @@ func (h *HugoSites) assemble(ctx context.Context, l logg.LevelLogger, bcfg *Buil
 }
 
 // render renders the sites.
-func (h *HugoSites) render(l logg.LevelLogger, config *BuildCfg) error {
+func (h *HugoSites) render(ctx context.Context, l logg.LevelLogger, config *BuildCfg) (err error) {
+	ctx, span := telemetry.Start(ctx, "hugo.build.render")
+	defer func() { telemetry.End(span, err) }()
 	l = l.WithField("step", "render")
 	start := time.Now()
 	defer func() {
 		loggers.TimeTrackf(l, start, h.buildCounters.loggFields(), "")
 	}()
 
-	siteRenderContext := &siteRenderContext{cfg: config, infol: l, multihost: h.Configs.IsMultihost}
+	siteRenderContext := &siteRenderContext{ctx: ctx, cfg: config, infol: l, multihost: h.Configs.IsMultihost}
 
 	renderErr := func(err error) error {
 		if err == nil {
@@ -483,7 +498,9 @@ func (h *HugoSites) render(l logg.LevelLogger, config *BuildCfg) error {
 	return nil
 }
 
-func (h *HugoSites) renderDeferred(l logg.LevelLogger) error {
+func (h *HugoSites) renderDeferred(ctx context.Context, l logg.LevelLogger) (err error) {
+	ctx, span := telemetry.Start(ctx, "hugo.build.render_deferred")
+	defer func() { telemetry.End(span, err) }()
 	l = l.WithField("step", "render deferred")
 	start := time.Now()
 
@@ -502,7 +519,7 @@ func (h *HugoSites) renderDeferred(l logg.LevelLogger) error {
 				return err
 			}
 		}
-		if err := s.executeDeferredTemplates(de); err != nil {
+		if err := s.executeDeferredTemplates(ctx, de); err != nil {
 			return herrors.ImproveRenderErr(err)
 		}
 	}
@@ -514,7 +531,7 @@ func (h *HugoSites) renderDeferred(l logg.LevelLogger) error {
 	return nil
 }
 
-func (s *Site) executeDeferredTemplates(de *deps.DeferredExecutions) error {
+func (s *Site) executeDeferredTemplates(ctx context.Context, de *deps.DeferredExecutions) error {
 	handleFile := func(filename string) error {
 		content, err := afero.ReadFile(s.BaseFs.PublishFs, filename)
 		if err != nil {
@@ -590,7 +607,7 @@ func (s *Site) executeDeferredTemplates(de *deps.DeferredExecutions) error {
 		return nil
 	}
 
-	g := rungroup.Run(context.Background(), rungroup.Config[string]{
+	g := rungroup.Run(ctx, rungroup.Config[string]{
 		NumWorkers: s.h.numWorkers,
 		Handle: func(ctx context.Context, filename string) error {
 			return handleFile(filename)
@@ -645,7 +662,9 @@ func (h *HugoSites) printUnusedTemplatesOnce() error {
 }
 
 // postProcess runs the post processors, e.g. writing the hugo_stats.json file.
-func (h *HugoSites) postProcess(l logg.LevelLogger) error {
+func (h *HugoSites) postProcess(ctx context.Context, l logg.LevelLogger) (err error) {
+	ctx, span := telemetry.Start(ctx, "hugo.build.post_process")
+	defer func() { telemetry.End(span, err) }()
 	l = l.WithField("step", "postProcess")
 	defer loggers.TimeTrackf(l, time.Now(), nil, "")
 
@@ -701,7 +720,7 @@ func (h *HugoSites) postProcess(l logg.LevelLogger) error {
 	}
 
 	workers := para.New(config.GetNumWorkerMultiplier())
-	g, _ := workers.Start(context.Background())
+	g, _ := workers.Start(ctx)
 
 	handleFile := func(filename string) error {
 		content, err := afero.ReadFile(h.BaseFs.PublishFs, filename)
